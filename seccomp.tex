@@ -1,0 +1,447 @@
+\documentclass[handout]{beamer}
+
+\usepackage[utf8]{inputenc}
+
+\usepackage{listings}
+\lstset
+{ 
+    language=C,
+    numbers=left,
+    basicstyle=\tiny
+}
+
+\usetheme{Warsaw}
+\mode<presentation>{}
+
+
+\setlength{\parskip}{\baselineskip} 
+
+\usepackage[style=verbose,backend=biber]{biblatex}
+\addbibresource{seccomp.bib}
+
+\usepackage{tikz}
+\usetikzlibrary{positioning}
+
+\usepackage{bytefield}
+
+\title{Kernel Hacker Stuff - Seccomp}
+\author{Jake Drahos}
+
+
+\AtBeginSection[]{
+  \begin{frame}
+  \vfill
+  \centering
+  \begin{beamercolorbox}[sep=8pt,center,shadow=true,rounded=true]{title}
+    \usebeamerfont{title}\insertsectionhead\par%
+  \end{beamercolorbox}
+  \vfill
+  \end{frame}
+}
+
+
+\begin{document}
+\begin{frame}
+ \titlepage
+\end{frame}
+
+\section{Overview}
+\subsection{Intro}
+\begin{frame}{The SECure COMPuting kernel facility}
+    Seccomp is a kernel facility providing a one-way transition into ``secure computing'' mode,
+    restricting which parts of the kernel API are accessible to the process. \footcite{kerneldoc}
+\end{frame}
+
+\subsection{Disclaimer}
+\begin{frame}{SECCOMP IS NOT A SANDBOX}
+  (this disclaimer itself is paraphrased from the official documentation)
+  
+  Seccomp, on its own, is neither a security feature nor a sandbox!
+  
+  \pause
+  However, it can be (and is) used to implement those things.
+  
+  \pause
+  While it isn't something you just ``turn on and get security'', it is important (or
+  at least interesting) to understand the kernel facilities that support useful security features).
+  
+\end{frame}
+
+\section{Operating Systems 101}
+\subsection{Process Isolation}
+\begin{frame}{Processor Execution Modes}
+\begin{itemize}
+ \item Modern (post-1980s) processors are designed to support the concept of ``process isolation''
+ via multiple privilege levels
+ \item User/process privilege level sees the machine as only its abstract ISA
+    \begin{itemize}
+%        \item ``Simplified'' - flat memory layout, no weird IO, no special instructions...
+        \item ``Privilege level'' in an ISA is a different concept that an OS user's privilege level
+    \end{itemize}
+ \item Any interaction with the outside world must be done by the kernel on behalf of the process!
+\end{itemize}
+\end{frame}
+
+%
+%\begin{frame}
+% What does a process see?
+% \begin{itemize}
+%  \item Its mapped memory (but has no ability to modify the mapping)
+%  \pause
+%  \item The processe's own instruction stream
+%  \pause
+%  \item Processor state (registers, condition flags, CSRs...)
+% \end{itemize}
+%\end{frame}
+
+%\begin{frame}
+% Notable omissions:
+% \begin{itemize}
+%  \item Most, if not all, concepts of IO
+%  \item Other process memory
+%  \item Kernel objects (synchronization locks, message queues, ...)
+%  \item MMU mapping
+% \end{itemize}
+% 
+% \pause
+% The kernel must provide services to interact with other processes and the real world. 
+%\end{frame}
+
+\subsection{System Calls}
+\begin{frame}{The syscall instruction}
+ISAs provide a system call instruction (\texttt{int 80h, syscall, ecall, t 0x6d,} etc.)
+
+\pause
+What the processor does when a syscall instruction executes:
+\begin{enumerate}
+ \item Save execution state (PC, SP, GP registers, condition...)
+ \item Switch to kernel-mode memory map
+ \item Increase privilege level
+ \item Begin executing instructions at a configured address
+\end{enumerate}
+
+The address where kernel-mode execution begins is the syscall entry handler
+
+\end{frame}
+
+\begin{frame}{System Calls as Function Calls}
+ A syscall API can be standardized just like any other library API.
+
+ \pause
+ Processes can execute a syscall by:
+ \begin{enumerate}
+  \item Setting up any buffers (allocate/copy memory)
+  \item Place arguments (pointers, flags, sizes...) where the ABI dictates
+  \item Execute the syscall instruction
+ \end{enumerate}
+ 
+ Kernel looks at arguments, info about the process (user, OS permissions...) and decides if/how
+ to fulfill the request.
+\end{frame}
+
+\section{The Linux Syscall Interface}
+
+\begin{frame}
+ Syscalls ultimately provide the only* mechanism by which processes can do
+ anything interesting.
+ 
+ Syscalls are documented in man(2), plus kernel documentation for ABI details
+ \pause
+ 
+ * getting creative with memory mapping (and evil x86 in/out instructions) can allow
+ direct access to IO (or shared memory), but require syscalls to set up.
+\end{frame}
+
+\subsection{Classic Syscalls}
+\begin{frame}{Traditional Unix IO}
+Simple, standard file operations
+   \begin{itemize}
+    \item open()
+    \item close()
+    \item read()
+    \item write()
+   \end{itemize}
+ 
+ \pause
+ (actually the *at versions tend to be used by glibc because reasons)
+\end{frame}
+
+\begin{frame}{Process Management}
+ Unix process lifecycle managed by syscalls
+ \begin{itemize}
+  \item \texttt{fork()}
+  \item \texttt{execve()}
+  \item \texttt{wait()}
+ \end{itemize}
+\end{frame}
+
+\begin{frame}{Memory map manipulation}
+Some syscalls allow a process to manipulate its own memory mapping
+\begin{itemize}
+ \item \texttt{sbrk()}
+ \item \texttt{mmap()}
+ \item \texttt{munmap(}
+\end{itemize}
+
+\end{frame}
+
+ 
+\subsection{Weird stuff}
+\begin{frame}{Ugly and evil syscalls}
+A few nasty ones:
+\begin{itemize}
+ \item \texttt{ioctl()} \textbf{HERE THERE BE DRAGONS}
+ \item \texttt{socket()}
+ \item \texttt{send()}
+ \item \texttt{recv()}
+\end{itemize}
+
+And approximately 300 more.
+\end{frame}
+
+\begin{frame}{``Non-syscall'' interfaces}
+ Better API design than \texttt{ioctl} through a few different interfaces:
+ \begin{itemize}
+  \item \texttt{procfs}
+  \item \texttt{sysfs}
+ \end{itemize}
+ 
+ \pause
+ But these all eventually rely on \texttt{read()}/\texttt{write()}.
+ 
+ \pause
+ Even direct accesses to mapped IO space require a \texttt{mmap()} syscall to set up.
+\end{frame}
+ 
+\subsection{Security implications}
+\begin{frame}{Kernel Attack Surface}
+ Syscalls represent the kernel's attack surface from userspace (IO attack surface eg. ping-of-death is a different story)
+ 
+ A naughty process can't exploit kernel bugs in syscalls it can't use.
+\end{frame}
+
+\begin{frame}{Userspace defense-in-depth}
+ Restricting syscalls can also protect a process from itself.
+ 
+ \pause
+ Classic RCE:
+ \begin{enumerate}
+  \item Buffer overflow
+  \item ROP or shellcode
+  \item \texttt{execve(``/bin/sh'', null)}
+  \item Profit!
+ \end{enumerate}
+ \pause
+ 
+ Good luck with that if you can't use the
+ \texttt{execve()} syscall!
+
+\end{frame}
+
+\begin{frame}{Sandboxing}
+ \textbf{SECCOMP IS NOT A SANDBOX}
+ \pause
+ 
+ Intercepting or filtering syscalls can harden a sandbox:
+ \pause
+ \begin{itemize}
+  \item Preventing opening new files
+  \item Disallow execution of other executables
+  \item Disallowing access to devices
+  \item Aggressively whitelisting only \texttt{read()}s and \texttt{write()}s
+  \item ...
+ \end{itemize}
+
+\end{frame}
+
+\section{Seccomp}
+\subsection{Seccomp overview}
+\begin{frame}{Enter: seccomp}
+ \texttt{seccomp} is the kernel feature that allows syscall filtering
+ 
+ Matching rules and behavior (perform as normal, \texttt{EINVAL}, send a signal) set during the
+ transition to seccomp mode - a one-way trip.
+ 
+ Technically happens over a few different \texttt{prctl} syscalls to handle the processes
+ privilege level and set up prerequisites to avoid breakout.
+\end{frame}
+
+\subsection{Modes of seccomp}
+\begin{frame}{SECCOMP\_SET\_MODE\_STRICT}
+Seccomp initially supported only ``strict'' mode.
+
+Simple, well-defined behavior:
+\begin{itemize}
+ \item \texttt{read()}
+ \item \texttt{write()}
+ \item \texttt{\_exit()}
+\end{itemize}
+\pause
+
+Nothing else allowed!
+\pause
+In addition to inflexibility, this totally breaks libc (hidden \texttt{sbrk()}s, \texttt{*at} syscalls, ...).
+\end{frame}
+
+\begin{frame}{SECCOMP\_SET\_MODE\_FILTER}
+This is where all the cool stuff lives!
+
+
+\begin{itemize}
+ \item Flexibility with which calls to filter.
+ \item Allow, crash, error, or signal
+\end{itemize}
+\pause
+Signalling offers interesting options to emulate IO functionality for a sandbox\footcite{chromium}.
+\end{frame}
+
+\subsection{BPF Intro}
+\begin{frame}{BPF intro}
+ The BSD Packet Filter\footcite{bpfpaper} was designed for matching on binary data in network packets.
+ \pause
+ 
+ Classic BPF operates as a simple accumulator-based virtual machine
+ \begin{itemize}
+  \item Accumulator and index(x) registers
+  \item Scratch memory
+  \item Read-only data memory (the packet)
+ \end{itemize}
+\end{frame}
+
+\begin{frame}
+ Funny note: 
+ 
+ SCO pointed to BPF as proof that Linux stole code from them...
+ \pause despite SCO never owning BSD (and therefore the original BPF code) in the first place\footcite{scobullshit}.
+\end{frame}
+
+\begin{frame}[fragile]{BPF instruction encoding}
+ Simple instruction encoding (two words per instruction):
+ 
+ \begin{bytefield}[endianness=big]{32}
+    \bitbox{16}{opcode:16} & \bitbox{8}{jt:8} & \bitbox{8}{jf:8} \\
+    \bitbox{32}{k:32}
+ \end{bytefield}
+ 
+ Not all opcodes use jt, jf, and k
+ 
+ jt and jf encode \textit{unsigned} jump distances for conditional jumps
+ 
+ k encodes a constant
+\end{frame}
+
+\begin{frame}{Example opcodes}
+ \begin{itemize}
+  \item \texttt{ld[b|h]} (load from data to accumulator)
+  \item \texttt{st} (store to scratch memory)
+  \item \texttt{jne}, \texttt{jgt}, etc. (conditional jumps)
+  \item \texttt{add}, \texttt{mul}, \texttt{or}, etc. (arithmetic and bitwise)
+ \end{itemize}
+\end{frame}
+
+\begin{frame}{Address modes}
+ Non-exhaustive list.
+ \begin{itemize}
+  \item Constant (encoded \texttt{k} in the instruction)
+  \item \texttt{x}
+  \item \texttt{[k]} or \texttt{[x+k]} (data)
+ \end{itemize}
+ \end{frame}
+ 
+\begin{frame}{Example}
+ \texttt{ldb [14]}\\
+ \texttt{and \#0xf}\\
+ \texttt{lsh \#2}\\
+ \texttt{tax}\\
+ \texttt{ldh [x+16]}\\
+ \texttt{jeq \#80, 0, 1}\\
+ \texttt{ret 1}\\
+ \texttt{ret 0}\\
+\end{frame}
+
+\subsection{BPF for seccomp}
+\begin{frame}{But how does it apply to seccomp!}
+BPF programs are used to implement the logic for syscall filtering with seccomp.
+\pause
+
+The implementation is pretty basic:
+\begin{itemize}
+ \item ``Packet Data'' is a \texttt{struct seccomp\_data}
+ \item BPF program return value determines behavior (allow/deny/EINVAL)
+ \item Flexible logic:
+ \begin{itemize}
+  \item Masking operations to check flags in arguments
+ \end{itemize}
+  \item \textit{No} ability to deference pointers (avoid race conditions)
+\end{itemize}
+
+\pause
+It is admittedly a bit overkill (eBPF is a story for another day).
+\end{frame}
+
+\begin{frame}[fragile]{\texttt{struct seccomp\_data}}
+\begin{verbatim}
+#include <seccomp.h>
+struct seccomp_data {
+    int     nr,                
+    _u32    arch,           
+    _u64    instruction_pointer,
+    _u64    args[6]
+};
+\end{verbatim}
+
+\end{frame}
+\begin{frame}[fragile]{BPF Programs in code}
+Classic BPF is easy enough to hand-write in C.
+
+Macros and structs provided to make it easy to express a program:
+ \begin{lstlisting}
+  struct sock_filter filter[] = {
+      BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, arch))),
+      BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, FILTER_ARCH, 1, 0),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+      BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))),
+      BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_read, 0, 1),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+      BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))),
+      BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_write, 0, 1),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+      BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))),
+      BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_writev, 0, 1),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+      BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))),
+      BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_open, 0, 1),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+      BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+  };
+ \end{lstlisting}
+\end{frame}
+
+\subsection{Applications}
+\begin{frame}{Applications}
+ \begin{itemize}
+  \item Chromium leverages seccomp for attack surface reduction
+  \begin{itemize}
+   \item also putting flash in time-out
+  \end{itemize}
+  \item Non-root sandboxing\footcite{mbox}
+  \item Theoretical: mobile-style app sandboxing with native code
+  \begin{itemize}
+   \item Userspace platform API calls into ``trusted'' regions to do syscalls
+   \item Sort of how VDSO and bits of NT already work
+   \item ROP exists...
+  \end{itemize}
+  \item QEMU (attack surface reduction)
+  \item Containers (magical christmas land)
+ \end{itemize}
+\end{frame}
+
+
+
+\begin{frame}
+ \printbibliography
+\end{frame}
+
+
+
+\end{document}
